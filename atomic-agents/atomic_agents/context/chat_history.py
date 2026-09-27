@@ -1,5 +1,6 @@
 import json
 import uuid
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Type, Union
@@ -201,7 +202,7 @@ class ChatHistory(BaseChatHistory):
             ChatHistory: A copy of the chat history.
         """
         new_history = ChatHistory(max_messages=self.max_messages)
-        new_history.load(self.dump())
+        new_history.history = deepcopy(self.history)
         new_history.current_turn_id = self.current_turn_id
         return new_history
 

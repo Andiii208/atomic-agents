@@ -135,6 +135,29 @@ def test_copy(history):
     assert copied_history.history[0].content.test_field == history.history[0].content.test_field
 
 
+def test_copy_with_local_schema_is_independent(history):
+    class LocalSchema(BaseIOSchema):
+        """Message schema defined by an application factory."""
+
+        items: List[Dict[str, List[str]]]
+
+    history.add_message("user", LocalSchema(items=[{"values": ["original"]}]))
+    copied_history = history.copy()
+
+    assert copied_history.max_messages == history.max_messages
+    assert copied_history.current_turn_id == history.current_turn_id
+    assert copied_history.get_history() == history.get_history()
+    assert isinstance(copied_history.history[0].content, LocalSchema)
+
+    copied_history.history[0].content.items[0]["values"].append("changed")
+    copied_history.history[0].role = "assistant"
+    copied_history.add_message("user", LocalSchema(items=[]))
+
+    assert history.history[0].content.items == [{"values": ["original"]}]
+    assert history.history[0].role == "user"
+    assert history.get_message_count() == 1
+
+
 def test_get_current_turn_id(history):
     assert history.get_current_turn_id() is None
     history.initialize_turn()

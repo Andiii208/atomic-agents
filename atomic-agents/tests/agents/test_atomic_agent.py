@@ -144,6 +144,30 @@ def test_initialization(agent, mock_instructor, mock_history, mock_system_prompt
     assert "max_tokens" not in agent.model_api_parameters
 
 
+def test_initial_history_with_local_schema_can_be_reset(mock_instructor):
+    class LocalInput(BaseIOSchema):
+        """Input schema created inside an application factory."""
+
+        chat_message: str
+
+    history = ChatHistory()
+    history.add_message("user", LocalInput(chat_message="Initial context"))
+    agent = AtomicAgent[LocalInput, BasicChatOutputSchema](AgentConfig(client=mock_instructor, history=history))
+
+    result = agent.run(LocalInput(chat_message="New question"))
+    assert result.chat_message == "Test output"
+    assert agent.history.get_message_count() == 3
+
+    agent.reset_history()
+    assert agent.history.get_message_count() == 1
+    assert isinstance(agent.history.history[0].content, LocalInput)
+    assert agent.history.history[0].content.chat_message == "Initial context"
+
+    agent.history.history[0].content.chat_message = "Changed"
+    agent.reset_history()
+    assert agent.history.history[0].content.chat_message == "Initial context"
+
+
 # model_api_parameters should have priority over other settings
 def test_initialization_temperature_priority(mock_instructor, mock_history, mock_system_prompt_generator):
     config = AgentConfig(
