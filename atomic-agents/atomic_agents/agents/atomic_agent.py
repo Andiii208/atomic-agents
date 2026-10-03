@@ -18,6 +18,39 @@ import json
 from instructor.dsl.partial import PartialBase
 from jiter import from_json
 
+# Instructor modes whose prepared request carries the output schema as a
+# tool/function definition instead of text inside the messages. Token accounting
+# must agree with the actual request, so these modes are counted with a tools
+# definition while all other modes append the schema to the system message.
+# Keep aligned with Instructor's per-mode request preparation; the parametrized
+# test in tests/agents/test_agent_mode_consistency.py prepares a request per
+# mode and asserts this set matches what is actually sent.
+# Mode.COHERE_TOOLS is deliberately absent: despite its name, its prepared
+# request embeds the schema in an instruction message and sends no tool.
+_TOOL_MODES = frozenset(
+    {
+        Mode.FUNCTIONS,
+        Mode.PARALLEL_TOOLS,
+        Mode.TOOLS,
+        Mode.TOOLS_STRICT,
+        Mode.RESPONSES_TOOLS,
+        Mode.RESPONSES_TOOLS_WITH_INBUILT_TOOLS,
+        Mode.ANTHROPIC_TOOLS,
+        Mode.ANTHROPIC_REASONING_TOOLS,
+        Mode.ANTHROPIC_PARALLEL_TOOLS,
+        Mode.MISTRAL_TOOLS,
+        Mode.VERTEXAI_TOOLS,
+        Mode.VERTEXAI_PARALLEL_TOOLS,
+        Mode.GEMINI_TOOLS,
+        Mode.GENAI_TOOLS,
+        Mode.XAI_TOOLS,
+        Mode.CEREBRAS_TOOLS,
+        Mode.FIREWORKS_TOOLS,
+        Mode.WRITER_TOOLS,
+        Mode.BEDROCK_TOOLS,
+    }
+)
+
 
 def model_from_chunks_patched(cls, json_chunks, **kwargs):
     potential_object = ""
@@ -91,7 +124,16 @@ class AgentConfig(BaseModel):
         ),
     )
     model_config = {"arbitrary_types_allowed": True}
-    mode: Mode = Field(default=Mode.TOOLS, description="The Instructor mode used for structured outputs (TOOLS, JSON, etc.).")
+    mode: Optional[Mode] = Field(
+        default=None,
+        description=(
+            "The Instructor mode used for structured outputs (TOOLS, JSON, etc.). "
+            "Drives token accounting only: modes that transmit the schema as a tool "
+            "definition count it as a tool, others append it to the system message. "
+            "When None, the client's mode is used; an explicit mode must agree with "
+            "the client's mode on how the schema is transmitted, or a warning is logged."
+        ),
+    )
     model_api_parameters: Optional[dict] = Field(None, description="Additional parameters passed to the API provider.")
     max_context_tokens: Optional[int] = Field(
         None,
@@ -202,7 +244,7 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
             self.tool_result_role = "user" if config.assistant_role == "model" else "system"
         self.initial_history = self.history.copy()
         self.current_user_input = None
-        self.mode = config.mode
+        self.mode = self._resolve_mode(config)
         self.model_api_parameters = config.model_api_parameters or {}
         self.max_context_tokens = config.max_context_tokens
 
@@ -215,6 +257,45 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
         Resets the history to its initial state.
         """
         self.history = self.initial_history.copy()
+
+    @staticmethod
+    def _resolve_mode(config: AgentConfig) -> Mode:
+        """
+        Resolves the effective Instructor mode used for token accounting.
+
+        The API call format is decided by the mode the Instructor client was created
+        with, so `AgentConfig.mode` follows the client by default. An explicitly
+        configured mode that disagrees with the client on how the schema is
+        transmitted warns, because token accounting then silently disagrees with
+        the actual API calls.
+
+        Args:
+            config (AgentConfig): Configuration for the chat agent.
+
+        Returns:
+            Mode: The mode to use for token accounting.
+        """
+        client_mode = getattr(config.client, "mode", None)
+        if not isinstance(client_mode, Mode):
+            # Clients that do not expose a Mode (or test doubles of them) cannot be
+            # compared; the explicitly configured mode, if any, is used as-is.
+            client_mode = None
+
+        if config.mode is None:
+            return client_mode if client_mode is not None else Mode.TOOLS
+
+        if client_mode is not None and (config.mode in _TOOL_MODES) != (client_mode in _TOOL_MODES):
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "AgentConfig.mode (%s) and the Instructor client's mode (%s) disagree on how the "
+                "output schema is transmitted, so token accounting will silently disagree with "
+                "the actual API calls. Create the Instructor client with %s as well, or omit "
+                "AgentConfig.mode to follow the client automatically.",
+                config.mode.name,
+                client_mode.name,
+                config.mode.name,
+            )
+        return config.mode
 
     def add_tool_result(self, content: BaseIOSchema) -> None:
         """
@@ -391,9 +472,8 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
         """
         from instructor.processing.schema import generate_openai_schema
 
-        # Only return tools for TOOLS-based modes
-        tools_modes = {Mode.TOOLS, Mode.TOOLS_STRICT, Mode.PARALLEL_TOOLS}
-        if self.mode in tools_modes:
+        # Only return tools for modes that transmit the schema as a tool definition
+        if self.mode in _TOOL_MODES:
             return [
                 {
                     "type": "function",
@@ -451,7 +531,10 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
                         # Text content - wrap in OpenAI text format
                         serialized_content.append({"type": "text", "text": item})
                     elif isinstance(item, (Image, Audio, PDF)):
-                        # Multimodal object - use instructor's to_openai method
+                        # Multimodal object - serialize with Instructor. The token
+                        # counter only accepts chat-format content parts, so media is
+                        # normalized to that format regardless of the agent's mode
+                        # (Responses-format parts such as input_image raise).
                         try:
                             serialized_content.append(item.to_openai(Mode.JSON))
                         except Exception as e:
