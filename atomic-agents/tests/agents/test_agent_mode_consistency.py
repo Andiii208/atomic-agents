@@ -8,7 +8,7 @@ requests Instructor actually prepares.
 """
 
 import logging
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import instructor
 import pytest
@@ -213,6 +213,33 @@ class TestMultimodalTokenCounting:
 
         assert result.history > 0
         assert result.tools > 0
+
+    def test_media_serialization_failure_falls_back_to_placeholder(self, caplog):
+        agent = _agent(AgentConfig(client=_client(instructor.Mode.TOOLS), model=COUNTING_MODEL))
+        history = [{"role": "user", "content": [instructor.Image.from_url("https://example.com/x.png")]}]
+
+        with (
+            caplog.at_level(logging.WARNING, logger=LOGGER_NAME),
+            patch.object(instructor.Image, "to_openai", side_effect=RuntimeError("serialization failed")),
+            patch.object(agent.history, "get_history", return_value=history),
+        ):
+            serialized = agent._serialize_history_for_token_count()
+
+        assert serialized == [{"role": "user", "content": [{"type": "text", "text": "[image content]"}]}]
+        assert any("Failed to serialize" in record.getMessage() for record in caplog.records)
+
+    def test_unknown_content_part_becomes_text(self):
+        agent = _agent(AgentConfig(client=_client(instructor.Mode.TOOLS), model=COUNTING_MODEL))
+
+        class UnknownPart:
+            def __str__(self):
+                return "unknown-part-7"
+
+        history = [{"role": "user", "content": [UnknownPart()]}]
+        with patch.object(agent.history, "get_history", return_value=history):
+            serialized = agent._serialize_history_for_token_count()
+
+        assert serialized == [{"role": "user", "content": [{"type": "text", "text": "unknown-part-7"}]}]
 
 
 class TestAccountingMatchesPreparedRequests:
