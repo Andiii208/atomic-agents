@@ -2,7 +2,7 @@ import instructor
 from instructor import Mode
 from instructor.processing.multimodal import Image, Audio, PDF
 from pydantic import BaseModel, Field
-from typing import Optional, Type, Generator, AsyncGenerator, get_args, get_origin, Dict, List, Callable, Any
+from typing import Optional, Type, Generator, AsyncGenerator, get_args, get_origin, Dict, List, Callable, Union, Any
 import logging
 from atomic_agents.context.chat_history import ChatHistory
 from atomic_agents.context.base_chat_history import BaseChatHistory
@@ -50,6 +50,9 @@ _TOOL_MODES = frozenset(
         Mode.BEDROCK_TOOLS,
     }
 )
+
+# Instructor multimodal objects that can be lowered to a chat-format content part.
+_InstructorMedia = Union[Image, Audio, PDF]
 
 
 def model_from_chunks_patched(cls, json_chunks, **kwargs):
@@ -269,12 +272,13 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
         self.history = self.initial_history.copy()
 
     @staticmethod
-    def _client_mode(client: Any) -> Optional[Mode]:
+    def _client_mode(client: instructor.Instructor) -> Optional[Mode]:
         """
         The mode of an Instructor client, when it exposes one.
 
-        Raw provider clients and test doubles have no comparable `mode` attribute;
-        None is returned for them.
+        `AgentConfig` only accepts Instructor clients, but a client double or a
+        custom client can still lack a comparable `mode` attribute; None is
+        returned for them.
         """
         mode = getattr(client, "mode", None)
         return mode if isinstance(mode, Mode) else None
@@ -572,12 +576,13 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
         return serialized
 
     @staticmethod
-    def _token_count_content_part(item: Any) -> Dict[str, Any]:
+    def _token_count_content_part(item: Union[str, _InstructorMedia, Dict[str, Any]]) -> Dict[str, Any]:
         """
         Converts one history content part to the chat format the token counter accepts.
 
         Args:
             item: A text part, an instructor multimodal object, or a content-part dict.
+                Anything else is counted as its string form.
 
         Returns:
             Dict[str, Any]: The content part in LiteLLM-compatible format.
@@ -596,7 +601,7 @@ class AtomicAgent[InputSchema: BaseIOSchema, OutputSchema: BaseIOSchema]:
         return {"type": "text", "text": str(item)}
 
     @staticmethod
-    def _serialize_media_for_token_count(item: Any) -> Dict[str, Any]:
+    def _serialize_media_for_token_count(item: _InstructorMedia) -> Dict[str, Any]:
         """
         Serializes an instructor media object to the chat format the token counter accepts.
 
