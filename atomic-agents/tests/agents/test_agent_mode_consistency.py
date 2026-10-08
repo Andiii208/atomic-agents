@@ -69,6 +69,26 @@ def _prepared_request(mode, messages=None):
     )[1]
 
 
+def _mode_id(mode):
+    """Readable test id for each Instructor mode."""
+    return mode.name
+
+
+def _agent_warnings(caplog):
+    """Assertion oracle: the warning records the agent module emitted during a test."""
+    return [record for record in caplog.records if record.name == LOGGER_NAME and record.levelno == logging.WARNING]
+
+
+def _assert_warns_once(caplog, *fragments):
+    """Assertion oracle: exactly one agent warning was logged, mentioning every fragment."""
+    warnings = _agent_warnings(caplog)
+
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    for fragment in fragments:
+        assert fragment in message
+
+
 class TestModeDerivation:
     """AgentConfig.mode defaults to the client's mode."""
 
@@ -134,10 +154,7 @@ class TestModeConsistencyWarning:
             agent = _agent(AgentConfig(client=_client(instructor.Mode.JSON), model=COUNTING_MODEL, mode=instructor.Mode.TOOLS))
 
         assert agent.mode == instructor.Mode.TOOLS
-        warnings = [r for r in caplog.records if r.name == LOGGER_NAME and r.levelno == logging.WARNING]
-        assert len(warnings) == 1
-        assert "TOOLS" in warnings[0].getMessage()
-        assert "JSON" in warnings[0].getMessage()
+        _assert_warns_once(caplog, "TOOLS", "JSON")
 
     def test_same_accounting_different_mode_does_not_warn(self, caplog):
         # TOOLS_STRICT on the config and TOOLS on the client both send a tools definition.
@@ -169,17 +186,13 @@ class TestModeConsistencyWarning:
                 )
             )
 
-        message = [r for r in caplog.records if r.name == LOGGER_NAME][0].getMessage()
-        assert "AgentConfig.mode (JSON)" in message
-        assert "client's mode (ANTHROPIC_TOOLS)" in message
+        _assert_warns_once(caplog, "AgentConfig.mode (JSON)", "client's mode (ANTHROPIC_TOOLS)")
 
     def test_warning_mentions_both_directions(self, caplog):
         with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
             _agent(AgentConfig(client=_client(instructor.Mode.TOOLS), model=COUNTING_MODEL, mode=instructor.Mode.JSON))
 
-        message = [r for r in caplog.records if r.name == LOGGER_NAME][0].getMessage()
-        assert "AgentConfig.mode (JSON)" in message
-        assert "client's mode (TOOLS)" in message
+        _assert_warns_once(caplog, "AgentConfig.mode (JSON)", "client's mode (TOOLS)")
 
 
 class TestMultimodalTokenCounting:
@@ -245,7 +258,7 @@ class TestMultimodalTokenCounting:
 class TestAccountingMatchesPreparedRequests:
     """The schema must be counted the same way Instructor transmits it."""
 
-    @pytest.mark.parametrize("mode", list(instructor.Mode), ids=lambda mode: mode.name)
+    @pytest.mark.parametrize("mode", list(instructor.Mode), ids=_mode_id)
     def test_tools_accounting_matches_prepared_request(self, mode):
         try:
             kwargs = _prepared_request(mode)
